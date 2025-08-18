@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  # SQL Server 데이터베이스
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: realestate_sqlserver
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_SA_PASSWORD: RealEstate123!
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    networks:
+      - realestate_network
+    restart: unless-stopped
+
+  # Redis (캐싱)
+  redis:
+    image: redis:7-alpine
+    container_name: realestate_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - realestate_network
+    restart: unless-stopped
+
+  # ASP.NET Core API
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: realestate_api
+    ports:
+      - "5000:8080"
+      - "5001:8081"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:8080;https://+:8081
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=RealEstateDB;User Id=sa;Password=RealEstate123!;TrustServerCertificate=true;
+      - Redis__ConnectionString=redis:6379
+    depends_on:
+      - sqlserver
+      - redis
+    networks:
+      - realestate_network
+    restart: unless-stopped
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: realestate_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+      - REACT_APP_WEB3_PROVIDER_URL=http://localhost:8545
+    depends_on:
+      - api
+    networks:
+      - realestate_network
+    restart: unless-stopped
+
+  # Ganache (Local Blockchain)
+  ganache:
+    image: trufflesuite/ganache:latest
+    container_name: realestate_ganache
+    ports:
+      - "8545:8545"
+    command: >
+      ganache
+      --host 0.0.0.0
+      --port 8545
+      --networkId 1337
+      --accounts 10
+      --deterministic
+      --mnemonic "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    networks:
+      - realestate_network
+    restart: unless-stopped
+
+volumes:
+  sqlserver_data:
+  redis_data:
+
+networks:
+  realestate_network:
+    driver: bridge
