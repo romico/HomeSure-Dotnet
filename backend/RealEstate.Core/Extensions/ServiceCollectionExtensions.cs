@@ -9,9 +9,6 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddCoreServices(this IServiceCollection services)
     {
-        // AutoMapper 설정
-        services.AddAutoMapper(Assembly.GetExecutingAssembly());
-
         // FluentValidation 설정
         services.AddValidatorsFromAssembly(Assembly.GetExecutingAssembly());
 

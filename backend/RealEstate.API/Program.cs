@@ -1,11 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using RealEstate.Infrastructure.Data;
-using RealEstate.Infrastructure.Extensions;
-using RealEstate.Core.Extensions;
 using Serilog;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
-using System.Text;
+using RealEstate.API.Extensions; // 추가
+using RealEstate.Core.Extensions; // 기존
+using RealEstate.Infrastructure.Extensions; // 기존
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -40,31 +38,9 @@ builder.Host.UseSerilog();
 // 서비스 추가
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(c =>
-{
-    c.SwaggerDoc("v1", new() 
-    { 
-        Title = "RealEstate Backend API", 
-        Version = "v1",
-        Description = "부동산 거래 플랫폼 API - 블록체인 기반 부동산 거래 시스템",
-        Contact = new Microsoft.OpenApi.Models.OpenApiContact
-        {
-            Name = "RealEstate",
-            Email = "romico@gmail.com"
-        }
-    });
 
-    var xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
-    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
-
-    if (File.Exists(xmlPath))
-    {
-        c.IncludeXmlComments(xmlPath);
-    }
-
-    // API 그룹화
-    c.TagActionsBy(api => new[] { api.GroupName ?? api.ActionDescriptor.RouteValues["controller"] });
-});
+// Swagger 설정을 확장 메서드로 분리
+builder.Services.AddSwaggerDocumentation();
 
 // 데이터베이스 설정
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
@@ -90,39 +66,14 @@ builder.Services.AddCors(options =>
     });
 });
 
-// JWT 인증 설정
-var jwtSettings = builder.Configuration.GetSection("JwtSettings");
-var secretKey = jwtSettings["SecretKey"];
-if (string.IsNullOrEmpty(secretKey))
-{
-    throw new InvalidOperationException("JWT SecretKey이 설정되지 않았습니다.");
-}
-
-var key = Encoding.ASCII.GetBytes(secretKey);
-Log.Information("JWT 인증 설정 완료. 키 길이: {KeyLength}", key.Length);
-
-builder.Services.AddAuthentication(x =>
-{
-    x.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-    x.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-})
-.AddJwtBearer(x =>
-{
-    x.RequireHttpsMetadata = false;
-    x.SaveToken = true;
-    x.TokenValidationParameters = new TokenValidationParameters
-    {
-        ValidateIssuerSigningKey = true,
-        IssuerSigningKey = new SymmetricSecurityKey(key),
-        ValidateIssuer = false,
-        ValidateAudience = false,
-        ClockSkew = TimeSpan.Zero
-    };
-});
+// JWT 인증 설정을 전용 확장 메서드로 분리하여 호출합니다.
+builder.Services.AddApiAuthentication(builder.Configuration); // JWT 인증 설정 추가
 
 // 커스텀 서비스 등록
 builder.Services.AddCoreServices();
 builder.Services.AddInfrastructureServices(builder.Configuration);
+// AutoMapper 등록
+builder.Services.AddAutoMapper(typeof(RealEstate.Infrastructure.Mapping.MappingProfile));
 
 var app = builder.Build();
 
@@ -165,23 +116,6 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-
-// 데이터베이스 마이그레이션 자동 실행
-try
-{
-    using (var scope = app.Services.CreateScope())
-    {
-        var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        Log.Information("데이터베이스 연결 확인 중...");
-        context.Database.EnsureCreated();
-        Log.Information("데이터베이스 초기화 완료");
-    }
-}
-catch (Exception ex)
-{
-    Log.Fatal(ex, "데이터베이스 초기화 실패");
-    throw;
-}
 
 Log.Information("=== RealEstate API Started Successfully ===");
 

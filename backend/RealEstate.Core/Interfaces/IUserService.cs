@@ -1,5 +1,5 @@
+using RealEstate.Core.DTOs;
 using RealEstate.Core.DTOs.Auth;
-using RealEstate.Core.Models;
 
 namespace RealEstate.Core.Interfaces
 {

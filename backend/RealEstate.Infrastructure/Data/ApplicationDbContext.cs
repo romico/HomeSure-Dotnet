@@ -1,5 +1,5 @@
 using Microsoft.EntityFrameworkCore;
-using RealEstate.Core.Models;
+using RealEstate.Core.Entities; // 엔티티 네임스페이스를 명시적으로 사용합니다.
 
 namespace RealEstate.Infrastructure.Data;
 
@@ -80,7 +80,7 @@ public class ApplicationDbContext : DbContext
         {
             var now = DateTime.UtcNow;
 
-            switch (entry.Entity)
+            switch (entry.Entity) // 다른 네임스페이스의 모델은 전체 경로로 참조합니다.
             {
                 case PropertyImage image:
                     image.CreatedAt = now;

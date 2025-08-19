@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using RealEstate.Core.Models;
+using RealEstate.Core.Entities;
 
 namespace RealEstate.Infrastructure.Data
 {
@@ -16,20 +16,10 @@ namespace RealEstate.Infrastructure.Data
             try
             {
                 logger.LogInformation("데이터베이스 초기화 시작...");
-
-                // Migration 적용
-                if ((await context.Database.GetPendingMigrationsAsync()).Any())
-                {
-                    logger.LogInformation("마이그레이션 적용 중...");
-                    await context.Database.MigrateAsync();
-                }
-                else
-                {
-                    // Migration이 없는 경우에만 EnsureCreated 사용
-                    await context.Database.EnsureCreatedAsync();
-                }
-
-                logger.LogInformation("데이터베이스 준비 완료");
+                
+                // 마이그레이션을 사용하여 데이터베이스 스키마를 최신 상태로 관리합니다.
+                await context.Database.MigrateAsync();
+                logger.LogInformation("데이터베이스 마이그레이션 완료");
 
                 // 관리자 계정이 없으면 생성
                 if (!await context.Users.AnyAsync())
@@ -50,7 +40,7 @@ namespace RealEstate.Infrastructure.Data
                     context.Users.Add(adminUser);
                     await context.SaveChangesAsync();
 
-                    logger.LogInformation("기본 관리자 계정이 생성되었습니다. (Email: admin@realestate.com, Password: Admin123!)");
+                    logger.LogInformation("기본 관리자 계정이 생성되었습니다. (Email: admin@realestate.com)");
                 }
 
                 logger.LogInformation("데이터베이스 초기화 완료");

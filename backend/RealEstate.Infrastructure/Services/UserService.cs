@@ -1,38 +1,36 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using RealEstate.Core.DTOs;
 using RealEstate.Core.DTOs.Auth;
-using RealEstate.Core.Interfaces;
-using RealEstate.Core.Models;
+using RealEstate.Core.Entities; // Models 대신 Entities를 사용합니다.
+using RealEstate.Core.Settings;
 using RealEstate.Infrastructure.Data;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using AutoMapper;
+using RealEstate.Core.Interfaces;
 
 namespace RealEstate.Infrastructure.Services
 {
     public class UserService : IUserService
     {
         private readonly ApplicationDbContext _context;
-        private readonly IConfiguration _configuration;
+        private readonly JwtSettings _jwtSettings;
+        private readonly IMapper _mapper;
 
-        public UserService(ApplicationDbContext context, IConfiguration configuration)
+        public UserService(ApplicationDbContext context, IOptions<JwtSettings> jwtSettings, IMapper mapper)
         {
             _context = context;
-            _configuration = configuration;
+            _jwtSettings = jwtSettings.Value;
+            _mapper = mapper;
         }
 
         public async Task<AuthResponseDto> RegisterAsync(RegisterDto registerDto)
         {
-            // 입력값 검증
-            if (string.IsNullOrWhiteSpace(registerDto.Email) || 
-                string.IsNullOrWhiteSpace(registerDto.Username) ||
-                string.IsNullOrWhiteSpace(registerDto.Password))
-            {
-                throw new ArgumentException("필수 입력값이 누락되었습니다.");
-            }
-
+            // 유효성 검사는 API 계층의 FluentValidation 미들웨어에서 처리됩니다.
             // 이메일 중복 확인
             if (await _context.Users.AnyAsync(u => u.Email == registerDto.Email))
             {
@@ -46,21 +44,21 @@ namespace RealEstate.Infrastructure.Services
             }
 
             // 사용자 생성
-            var user = new User
+            var user = new Core.Entities.User // 명시적으로 엔티티 타입을 사용합니다.
             {
                 Username = registerDto.Username,
                 Email = registerDto.Email,
                 FirstName = registerDto.FirstName,
                 LastName = registerDto.LastName,
                 PhoneNumber = registerDto.PhoneNumber,
-                PasswordHash = HashPassword(registerDto.Password)
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(registerDto.Password)
                 // CreatedAt, UpdatedAt은 SaveChanges에서 자동 설정됨
             };
 
-            _context.Users.Add(user);
+            _context.Users.Add(user); // 이제 user는 올바른 타입인 Entities.User 입니다.
             await _context.SaveChangesAsync();
 
-            return GenerateAuthResponse(user);
+            return await GenerateAuthResponse(user);
         }
 
         public async Task<AuthResponseDto> LoginAsync(LoginDto loginDto)
@@ -68,7 +66,7 @@ namespace RealEstate.Infrastructure.Services
             var user = await _context.Users
                 .FirstOrDefaultAsync(u => u.Email == loginDto.EmailOrUsername || u.Username == loginDto.EmailOrUsername);
 
-            if (user == null || !VerifyPassword(loginDto.Password, user.PasswordHash))
+            if (user == null || !BCrypt.Net.BCrypt.Verify(loginDto.Password, user.PasswordHash))
             {
                 throw new UnauthorizedAccessException("이메일/사용자명 또는 비밀번호가 잘못되었습니다.");
             }
@@ -78,35 +76,59 @@ namespace RealEstate.Infrastructure.Services
                 throw new UnauthorizedAccessException("비활성화된 계정입니다.");
             }
 
-            return GenerateAuthResponse(user);
+            return await GenerateAuthResponse(user);
         }
 
         public async Task<AuthResponseDto> RefreshTokenAsync(string refreshToken)
         {
-            // TODO: Refresh token 로직 구현 (간단한 버전)
-            throw new NotImplementedException("Refresh token 기능은 추후 구현됩니다.");
+            var storedToken = await _context.RefreshTokens
+                .Include(rt => rt.User)
+                .FirstOrDefaultAsync(rt => rt.Token == refreshToken);
+
+            if (storedToken == null)
+            {
+                throw new SecurityTokenException("유효하지 않은 리프레시 토큰입니다.");
+            }
+
+            if (storedToken.IsRevoked || storedToken.Expires < DateTime.UtcNow)
+            {
+                throw new SecurityTokenException("만료되었거나 폐기된 리프레시 토큰입니다.");
+            }
+
+            // 여러 DB 업데이트를 하나의 트랜잭션으로 묶어 원자성을 보장합니다.
+            await using var transaction = await _context.Database.BeginTransactionAsync();
+
+            // 기존 리프레시 토큰을 폐기합니다 (선택적: 토큰 순환 전략).
+            storedToken.IsRevoked = true;
+            _context.Update(storedToken);
+
+            // 새로운 토큰 세트를 발급합니다.
+            var authResponse = await GenerateAuthResponse(storedToken.User);
+            
+            await transaction.CommitAsync();
+            return authResponse;
         }
 
-        public async Task<bool> RevokeTokenAsync(string token)
+        public Task<bool> RevokeTokenAsync(string token)
         {
             // TODO: Token revocation 로직 구현
-            return await Task.FromResult(true);
+            return Task.FromResult(true); // async/await가 불필요하므로 Task.FromResult를 직접 반환합니다.
         }
 
-        public async Task<UserDto?> GetUserByIdAsync(int userId)
+        public async Task<Core.DTOs.UserDto?> GetUserByIdAsync(int userId)
         {
             var user = await _context.Users.FindAsync(userId);
             if (user == null) return null;
 
-            return MapToUserDto(user);
+            return _mapper.Map<UserDto>(user);
         }
 
-        public async Task<UserDto?> GetUserByEmailAsync(string email)
+        public async Task<Core.DTOs.UserDto?> GetUserByEmailAsync(string email)
         {
             var user = await _context.Users.FirstOrDefaultAsync(u => u.Email == email);
             if (user == null) return null;
 
-            return MapToUserDto(user);
+            return _mapper.Map<UserDto>(user);
         }
 
         public async Task<bool> VerifyEmailAsync(int userId, string token)
@@ -130,13 +152,13 @@ namespace RealEstate.Infrastructure.Services
                 return false;
             }
 
-            var user = await _context.Users.FindAsync(userId);
-            if (user == null || !VerifyPassword(currentPassword, user.PasswordHash))
+            var user = await _context.Users.FindAsync(userId); // ChangePassword는 추적이 필요하므로 FindAsync 사용
+            if (user == null || !BCrypt.Net.BCrypt.Verify(currentPassword, user.PasswordHash))
             {
                 return false;
             }
 
-            user.PasswordHash = HashPassword(newPassword);
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
             // UpdatedAt은 SaveChanges에서 자동 설정됨
             await _context.SaveChangesAsync();
             return true;
@@ -149,39 +171,39 @@ namespace RealEstate.Infrastructure.Services
             return user != null;
         }
 
-        private AuthResponseDto GenerateAuthResponse(User user)
+        private async Task<AuthResponseDto> GenerateAuthResponse(Core.Entities.User user)
         {
-            var token = GenerateJwtToken(user);
-            var refreshToken = GenerateRefreshToken();
+            var (token, expires) = GenerateJwtToken(user);
+            var refreshTokenString = GenerateRefreshTokenString();
 
-            return new AuthResponseDto
+            var refreshToken = new RefreshToken
             {
-                Token = token.Token,
-                Expires = token.Expires,
-                RefreshToken = refreshToken,
-                User = MapToUserDto(user)
+                Token = refreshTokenString,
+                UserId = user.Id,
+                Expires = DateTime.UtcNow.AddDays(7), // 리프레시 토큰 만료 기간 설정
+                CreatedAt = DateTime.UtcNow
             };
+
+            await _context.RefreshTokens.AddAsync(refreshToken);
+            await _context.SaveChangesAsync();
+
+            // record 생성자를 사용하여 DTO를 생성합니다.
+            return new AuthResponseDto(token, refreshTokenString, expires, _mapper.Map<UserDto>(user));
         }
 
-        private (string Token, DateTime Expires) GenerateJwtToken(User user)
+        private (string Token, DateTime Expires) GenerateJwtToken(Core.Entities.User user)
         {
-            var jwtSettings = _configuration.GetSection("JwtSettings");
-
-            // JWT 설정값 검증
-            var secret = jwtSettings["Secret"];
-            if (string.IsNullOrEmpty(secret))
+            // IOptions<JwtSettings>를 사용하여 강력한 형식의 설정에 접근합니다.
+            if (string.IsNullOrEmpty(_jwtSettings.SecretKey))
             {
-                throw new InvalidOperationException("JWT Secret이 설정되지 않았습니다.");
+                throw new InvalidOperationException("JWT SecretKey가 설정되지 않았습니다.");
             }
 
-            var issuer = jwtSettings["Issuer"] ?? "RealEstateAPI";
-            var audience = jwtSettings["Audience"] ?? "RealEstateUsers";
+            var issuer = _jwtSettings.Issuer;
+            var audience = _jwtSettings.Audience;
+            var expires = DateTime.UtcNow.AddHours(_jwtSettings.ExpirationHours);
 
-            // 만료 시간 설정 (설정에서 읽거나 기본값 7일)
-            var expiryDays = int.TryParse(jwtSettings["ExpiryDays"], out var days) ? days : 7;
-            var expires = DateTime.UtcNow.AddDays(expiryDays);
-
-            var key = Encoding.UTF8.GetBytes(secret);
+            var key = Encoding.UTF8.GetBytes(_jwtSettings.SecretKey);
 
             var tokenDescriptor = new SecurityTokenDescriptor
             {
@@ -208,82 +230,12 @@ namespace RealEstate.Infrastructure.Services
             return (tokenHandler.WriteToken(token), expires);
         }
 
-        private string GenerateRefreshToken()
+        private string GenerateRefreshTokenString()
         {
             var randomNumber = new byte[64]; // 더 긴 토큰으로 보안 강화
             using var rng = RandomNumberGenerator.Create();
             rng.GetBytes(randomNumber);
             return Convert.ToBase64String(randomNumber);
-        }
-
-        private string HashPassword(string password)
-        {
-            // PBKDF2를 사용한 해시 생성 (BCrypt 대신)
-            using var rng = RandomNumberGenerator.Create();
-            var salt = new byte[16];
-            rng.GetBytes(salt);
-
-            using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
-            var hash = pbkdf2.GetBytes(32);
-
-            // salt + hash 를 Base64로 인코딩
-            var result = new byte[48]; // 16 + 32
-            Array.Copy(salt, 0, result, 0, 16);
-            Array.Copy(hash, 0, result, 16, 32);
-
-            return Convert.ToBase64String(result);
-        }
-
-        private bool VerifyPassword(string password, string hash)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(hash))
-                {
-                    return false;
-                }
-
-                var hashBytes = Convert.FromBase64String(hash);
-                if (hashBytes.Length != 48) // 16 + 32
-                {
-                    return false;
-                }
-
-                // salt 추출
-                var salt = new byte[16];
-                Array.Copy(hashBytes, 0, salt, 0, 16);
-
-                // 저장된 해시 추출
-                var storedHash = new byte[32];
-                Array.Copy(hashBytes, 16, storedHash, 0, 32);
-
-                // 입력된 비밀번호로 해시 생성
-                using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, 10000, HashAlgorithmName.SHA256);
-                var testHash = pbkdf2.GetBytes(32);
-
-                // 해시 비교
-                return CryptographicOperations.FixedTimeEquals(storedHash, testHash);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private UserDto MapToUserDto(User user)
-        {
-            return new UserDto
-            {
-                Id = user.Id,
-                Username = user.Username,
-                Email = user.Email,
-                FirstName = user.FirstName,
-                LastName = user.LastName,
-                PhoneNumber = user.PhoneNumber,
-                Role = user.Role,
-                IsEmailVerified = user.IsEmailVerified,
-                CreatedAt = user.CreatedAt
-            };
         }
     }
 }
